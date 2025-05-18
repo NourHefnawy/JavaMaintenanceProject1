@@ -1,109 +1,134 @@
 package net.java.lms_backend.Service;
 
 import net.java.lms_backend.Repositrory.CourseRepository;
-import net.java.lms_backend.Repositrory.QuestionRepository;
-
-import net.java.lms_backend.dto.QuestionDTO;
+import net.java.lms_backend.Repositrory.QuizAttemptRepository;
+import net.java.lms_backend.Repositrory.QuizRepository;
+import net.java.lms_backend.Repositrory.StudentRepository;
+import net.java.lms_backend.dto.QuizDTO;
 import net.java.lms_backend.entity.Course;
 import net.java.lms_backend.entity.Question;
-import net.java.lms_backend.entity.QuestionOption;
-import net.java.lms_backend.mapper.QuestionMapper;
+import net.java.lms_backend.entity.Quiz;
+import net.java.lms_backend.entity.QuizAttempt;
+import net.java.lms_backend.entity.Student;
+import net.java.lms_backend.mapper.QuizMapper;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
 
-import java.util.List;
+import java.util.*;
 import java.util.stream.Collectors;
 
 @Service
-public class QuestionService {
-    private final QuestionRepository questionRepository;
+public class QuizService {
+    private final QuizRepository quizRepository;
+    private final QuizAttemptRepository quizAttemptRepository;
     private final CourseRepository courseRepository;
+    private final StudentRepository studentRepository;
 
-    public QuestionService(QuestionRepository questionRepository, CourseRepository courseRepository) {
-        this.questionRepository = questionRepository;
+    public QuizService(QuizRepository quizRepository,
+                       QuizAttemptRepository quizAttemptRepository,
+                       CourseRepository courseRepository,
+                       StudentRepository studentRepository) {
+        this.quizRepository = quizRepository;
+        this.quizAttemptRepository = quizAttemptRepository;
         this.courseRepository = courseRepository;
+        this.studentRepository = studentRepository;
     }
 
-    @Transactional
-    public QuestionDTO createQuestion(QuestionDTO questionDTO) {
-        Course course = courseRepository.findById(questionDTO.getCourseId())
-                .orElseThrow(() -> new RuntimeException("Course not found with ID: " + questionDTO.getCourseId()));
-
-        Question question = QuestionMapper.mapToQuestion(questionDTO, course);
-        question = questionRepository.save(question);
-
-        return QuestionMapper.mapToQuestionDTO(question);
+    public Quiz createQuiz(Long courseId, QuizDTO quizDTO) {
+        Course course = courseRepository.findById(courseId)
+                .orElseThrow(() -> new NoSuchElementException("Course not found"));
+        Quiz quiz = QuizMapper.toEntity(quizDTO);
+        quiz.setCourse(course);
+        return quizRepository.save(quiz);
     }
 
-    public List<QuestionDTO> getAllQuestions() {
-        return questionRepository.findAll()
-                .stream()
-                .map(QuestionMapper::mapToQuestionDTO)
+    public QuizAttempt generateQuizAttempt(Long quizId, Long studentId) {
+        Quiz quiz = quizRepository.findById(quizId)
+                .orElseThrow(() -> new NoSuchElementException("Quiz not found"));
+
+        Student student = studentRepository.findById(studentId)
+                .orElseThrow(() -> new NoSuchElementException("Student not found"));
+
+        List<Question> questions = quiz.getCourse().getQuestionsBank();
+
+        List<Question> mcqQuestions = getRandomQuestions(questions, "MCQ", quiz.getNumOfMCQ());
+        List<Question> trueFalseQuestions = getRandomQuestions(questions, "TRUE_FALSE", quiz.getNumOfTrueFalse());
+        List<Question> shortAnswerQuestions = getRandomQuestions(questions, "SHORT_ANSWER", quiz.getNumOfShortAnswer());
+
+        List<Question> selectedQuestions = new ArrayList<>();
+        selectedQuestions.addAll(mcqQuestions);
+        selectedQuestions.addAll(trueFalseQuestions);
+        selectedQuestions.addAll(shortAnswerQuestions);
+
+        QuizAttempt quizAttempt = new QuizAttempt();
+        quizAttempt.setQuiz(quiz);
+        quizAttempt.setStudent(student);
+        quizAttempt.setQuestions(selectedQuestions);
+
+        return quizAttemptRepository.save(quizAttempt);
+    }
+
+    private List<Question> getRandomQuestions(List<Question> questions, String type, Long count) {
+        List<Question> filteredQuestions = questions.stream()
+                .filter(q -> q.getType().equalsIgnoreCase(type))
                 .collect(Collectors.toList());
-    }
 
-    public QuestionDTO getQuestionById(Long id) {
-        Question question = questionRepository.findById(id)
-                .orElseThrow(() -> new RuntimeException("Question not found with ID: " + id));
-        return QuestionMapper.mapToQuestionDTO(question);
-    }
-
-    public void deleteQuestion(Long id) {
-        if (!questionRepository.existsById(id)) {
-            throw new RuntimeException("Question not found with ID: " + id);
+        if (filteredQuestions.size() < count) {
+            throw new IllegalArgumentException("Not enough questions of type: " + type);
         }
-        questionRepository.deleteById(id);
+
+        Collections.shuffle(filteredQuestions);
+        return filteredQuestions.subList(0, Math.toIntExact(count));
     }
 
-    @Transactional
-    public QuestionDTO updateQuestion(Long id, QuestionDTO questionDTO) {
-        Question existingQuestion = questionRepository.findById(id)
-                .orElseThrow(() -> new RuntimeException("Question not found with ID: " + id));
+    public int updateQuizAttempt(Long quizAttemptId, Map<Long, String> answers) {
+        QuizAttempt quizAttempt = quizAttemptRepository.findById(quizAttemptId)
+                .orElseThrow(() -> new NoSuchElementException("Quiz attempt not found"));
 
-        Course course = courseRepository.findById(questionDTO.getCourseId())
-                .orElseThrow(() -> new RuntimeException("Course not found with ID: " + questionDTO.getCourseId()));
+        quizAttempt.setAnswers(answers);
 
-        existingQuestion.setContent(questionDTO.getContent());
-        existingQuestion.setType(questionDTO.getType());
-        existingQuestion.setOptions(questionDTO.getOptions().stream()
-                .map(dto -> {
-                    QuestionOption option = new QuestionOption();
-                    option.setOptionContent(dto.getOptionContent());
-                    option.setQuestion(existingQuestion);
-                    return option;
-                }).collect(Collectors.toList()));
-        existingQuestion.setCorrectAnswer(questionDTO.getCorrectAnswer());
-        existingQuestion.setCourse(course);
+        int score = 0;
+        for (Map.Entry<Long, String> entry : answers.entrySet()) {
+            Long questionId = entry.getKey();
+            String studentAnswer = entry.getValue();
 
-        Question updatedQuestion = questionRepository.save(existingQuestion);
-        return QuestionMapper.mapToQuestionDTO(updatedQuestion);
+            Question question = quizAttempt.getQuestions().stream()
+                    .filter(q -> q.getId().equals(questionId))
+                    .findFirst()
+                    .orElseThrow(() -> new IllegalArgumentException("Invalid question ID: " + questionId));
+
+            if (question.getCorrectAnswer().equalsIgnoreCase(studentAnswer)) {
+                score++;
+            }
+        }
+
+        quizAttempt.setScore(score);
+        quizAttemptRepository.save(quizAttempt);
+
+        return score;
     }
 
-    @Transactional
-    public void addQuestionsToCourse(Long courseId, List<QuestionDTO> questionDTOs) {
-        Course course = courseRepository.findById(courseId)
-                .orElseThrow(() -> new RuntimeException("Course not found with id: " + courseId));
-
-        List<Question> questions = questionDTOs.stream()
-                .map(questionDTO -> {
-                    Question question = QuestionMapper.mapToQuestion(questionDTO, course);
-                    course.addQuestion(question); // Ensure bidirectional relationship is maintained
-                    return question;
-                })
-                .collect(Collectors.toList());
-
-        course.getQuestionsBank().addAll(questions); // Add all questions to the course's question bank
-        courseRepository.save(course);
+    public QuizAttempt getQuizAttempt(Long quizAttemptId) {
+        return quizAttemptRepository.findById(quizAttemptId)
+                .orElseThrow(() -> new NoSuchElementException("Quiz attempt not found"));
     }
 
-    public List<QuestionDTO> getQuestionsByCourseId(Long courseId) {
-        Course course = courseRepository.findById(courseId)
-                .orElseThrow(() -> new RuntimeException("Course not found with id: " + courseId));
+    public double getAverageScoreByQuizId(Long quizId) {
+        List<QuizAttempt> quizAttempts = quizAttemptRepository.findByQuizId(quizId);
+        if (quizAttempts.isEmpty()) return 0.0;
 
-        List<Question> questions = course.getQuestionsBank();
+        int totalScore = quizAttempts.stream().mapToInt(QuizAttempt::getScore).sum();
+        return (double) totalScore / quizAttempts.size();
+    }
 
-        return questions.stream()
-                .map(QuestionMapper::mapToQuestionDTO)
-                .collect(Collectors.toList());
+    public List<QuizAttempt> getQuizAttemptsByStudent(Long studentId, long courseId) {
+        return quizAttemptRepository.findByStudentIdAndQuiz_Course_Id(studentId, courseId);
+    }
+
+    public Double getAverageScoreOfStudent(Long studentId, long courseId) {
+        List<QuizAttempt> quizAttempts = quizAttemptRepository.findByStudentIdAndQuiz_Course_Id(studentId, courseId);
+        return quizAttempts.stream()
+                .mapToDouble(QuizAttempt::getScore)
+                .average()
+                .orElse(0.0);
     }
 }
